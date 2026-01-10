@@ -1,10 +1,13 @@
 from selenium import webdriver
-from selenium.webdriver.firefox.service import Service
-from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.firefox import GeckoDriverManager
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from pymongo import MongoClient
 import time
@@ -105,18 +108,65 @@ def scrape_product_details(driver, product_url):
         print(f"  ⚠️  Error scraping {product_url}: {e}")
         return None
 
-def scrape_depop(url, save_to_db=True, max_products=100):
-    # Set up Firefox options for headless mode
-    firefox_options = Options()
-    firefox_options.add_argument('--headless')  # Run without GUI
-    firefox_options.add_argument('--no-sandbox')
-    firefox_options.add_argument('--disable-dev-shm-usage')
+def initialize_driver(browser='chrome'):
+    """
+    Initialize Selenium WebDriver for specified browser
     
-    # Initialize driver
-    driver = webdriver.Firefox(
-        service=Service(GeckoDriverManager().install()),
-        options=firefox_options
-    )
+    Args:
+        browser (str): 'chrome' or 'firefox'
+    
+    Returns:
+        WebDriver instance
+    """
+    browser = browser.lower()
+    
+    if browser == 'chrome':
+        # Set up Chrome options for headless mode
+        chrome_options = ChromeOptions()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        
+        # Initialize Chrome driver
+        driver = webdriver.Chrome(
+            service=ChromeService(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+        print("🌐 Using Chrome browser")
+        
+    elif browser == 'firefox':
+        # Set up Firefox options for headless mode
+        firefox_options = FirefoxOptions()
+        firefox_options.add_argument('--headless')
+        firefox_options.add_argument('--no-sandbox')
+        firefox_options.add_argument('--disable-dev-shm-usage')
+        
+        # Initialize Firefox driver
+        driver = webdriver.Firefox(
+            service=FirefoxService(GeckoDriverManager().install()),
+            options=firefox_options
+        )
+        print("🦊 Using Firefox browser")
+        
+    else:
+        raise ValueError(f"Unsupported browser: {browser}. Use 'chrome' or 'firefox'")
+    
+    return driver
+
+def scrape_depop(url, save_to_db=True, max_products=100, browser='chrome'):
+    """
+    Scrape Depop listings
+    
+    Args:
+        url (str): Depop category URL to scrape
+        save_to_db (bool): Whether to save results to MongoDB
+        max_products (int): Maximum number of products to scrape
+        browser (str): Browser to use - 'chrome' or 'firefox'
+    """
+    # Initialize driver with chosen browser
+    driver = initialize_driver(browser)
     
     # Connect to MongoDB if saving
     if save_to_db:
@@ -229,7 +279,8 @@ if __name__ == "__main__":
     print("DEPOP DEEP SCRAPER -> MongoDB")
     print("="*50)
     
-    results = scrape_depop(url, save_to_db=True, max_products=100)
+    # You can change 'chrome' to 'firefox' to switch browsers
+    results = scrape_depop(url, save_to_db=True, max_products=100, browser='chrome')
     
     if results:
         print(f"\n{'='*50}")
