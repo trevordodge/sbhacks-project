@@ -60,7 +60,7 @@ def scrape_depop(url):
         # Get all sizes - FIXED: single 'j' at the end
         sizes = soup.find_all(class_='styles_sizeAttributeText__r9QJj')
 
-        all_names = soup.find_all(class_='_normal_bevez_51')
+        all_names = soup.select('.styles_productAttributes__nt3TO > p:last-child')
 
         products = []
         price_index = 0
