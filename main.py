@@ -55,7 +55,7 @@ def scrape_depop(url):
         all_images = soup.find_all('img')
         
         # Also get all prices
-        all_prices = soup.find_all(class_='styles_price__H8qdh')
+        all_prices = soup.select('.styles_price__H8qdh:not(.styles_discountedFullPrice__JTi1d)')
         
         # Get all sizes - FIXED: single 'j' at the end
         sizes = soup.find_all(class_='styles_sizeAttributeText__r9QJj')
@@ -88,7 +88,7 @@ def scrape_depop(url):
                 
                 # Method 1: Look in parent link
                 if parent_link:
-                    price_elem = parent_link.find(class_='styles_price__H8qdh')
+                    price_elem = parent_link.select_one('.styles_price__H8qdh:not(.styles_discountedFullPrice__JTi1d)')
                     if price_elem:
                         price = price_elem.text.strip()
                 
@@ -98,7 +98,7 @@ def scrape_depop(url):
                     container = img.find_parent('div')
                     for _ in range(5):  # Try going up 5 levels
                         if container:
-                            price_elem = container.find(class_='styles_price__H8qdh')
+                            price_elem = container.select_one('.styles_price__H8qdh:not(.styles_discountedFullPrice__JTi1d)')
                             if price_elem:
                                 price = price_elem.text.strip()
                                 break
