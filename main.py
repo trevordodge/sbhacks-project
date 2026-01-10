@@ -35,6 +35,9 @@ def scrape_depop(url):
         # Scroll to load more products (Depop uses lazy loading)
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 3  # Number of scrolls
+
+        size = 'N/A'
+        name = 'N/A'
         
         for _ in range(scroll_attempts):
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -48,15 +51,21 @@ def scrape_depop(url):
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Find all price elements
-        prices = soup.find_all(class_='styles_price__H8qdh')
-        print(f"Found {len(prices)} prices:")
-        for price in prices:
-            print(f"  Price: {price.text}")
-        
-        # Find all product images
+        # Find all product images first
         all_images = soup.find_all('img')
-        product_images = []
+        
+        # Also get all prices
+        all_prices = soup.find_all(class_='styles_price__H8qdh')
+        
+        # Get all sizes - FIXED: single 'j' at the end
+        sizes = soup.find_all(class_='styles_sizeAttributeText__r9QJj')
+
+        all_names = soup.find_all(class_='_normal_bevez_51')
+
+        products = []
+        price_index = 0
+        size_index = 0
+        name_index = 0
         
         for img in all_images:
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
@@ -64,21 +73,81 @@ def scrape_depop(url):
                 # Get high quality version
                 if '/medium/' in img_url:
                     img_url = img_url.replace('/medium/', '/large/')
-                product_images.append(img_url)
+                
+                # Find the parent link (traverse up the DOM tree)
+                parent_link = img.find_parent('a', href=True)
+                
+                product_url = 'N/A'
+                if parent_link:
+                    product_url = parent_link.get('href')
+                    if product_url and not product_url.startswith('http'):
+                        product_url = 'https://www.depop.com' + product_url
+                
+                # Try multiple ways to find price
+                price = 'N/A'
+                
+                # Method 1: Look in parent link
+                if parent_link:
+                    price_elem = parent_link.find(class_='styles_price__H8qdh')
+                    if price_elem:
+                        price = price_elem.text.strip()
+                
+                # Method 2: Look in siblings or nearby elements
+                if price == 'N/A':
+                    # Go up multiple levels to find a container
+                    container = img.find_parent('div')
+                    for _ in range(5):  # Try going up 5 levels
+                        if container:
+                            price_elem = container.find(class_='styles_price__H8qdh')
+                            if price_elem:
+                                price = price_elem.text.strip()
+                                break
+                            container = container.find_parent('div')
+                
+                # Method 3: Use sequential matching (assume prices are in same order as images)
+                if price == 'N/A' and price_index < len(all_prices):
+                    price = all_prices[price_index].text.strip()
+                    price_index += 1
+                
+               
+                if size_index < len(sizes):
+                    size = sizes[size_index].text.strip()
+                    size_index += 1
+
+                if name_index < len(all_names): 
+                    name = all_names[name_index].text.strip()
+                    name_index += 1
+   
+                products.append({
+                    'url': product_url,
+                    'image': img_url,
+                    'price': price,
+                    'size': size,
+                    'name': name
+                })
         
-        # Remove duplicates while preserving order
-        product_images = list(dict.fromkeys(product_images))
+        # Remove duplicates based on image URL
+        seen_images = set()
+        unique_products = []
+        for product in products:
+            if product['image'] not in seen_images:
+                seen_images.add(product['image'])
+                unique_products.append(product)
         
         print(f"\n{'='*50}")
-        print(f"Total unique product images: {len(product_images)}")
+        print(f"Total unique products: {len(unique_products)}")
         print(f"{'='*50}\n")
         
-        for idx, img_url in enumerate(product_images, 1):
-            print(f"{idx}. {img_url}")
+        for idx, product in enumerate(unique_products, 1):
+            print(f"\n{product['name']}:")
+            print(f"  Price: {product['price']}")
+            print(f"  Size: {product['size']}")
+            print(f"  URL: {product['url']}")
+            print(f"  Image: {product['image']}")
+            print("-" * 50)
         
         return {
-            'prices': [price.text for price in prices],
-            'images': product_images
+            'products': unique_products
         }
         
     except Exception as e:
@@ -97,5 +166,5 @@ results = scrape_depop(url)
 
 if results:
     print(f"\n{'='*50}")
-    print(f"Summary: {len(results['prices'])} products found")
+    print(f"Summary: {len(results['products'])} products found")
     print(f"{'='*50}")
