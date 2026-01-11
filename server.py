@@ -124,10 +124,10 @@ def record_swipe():
         data = request.json
         session_id = data.get('session_id', 'default')
         listing_id = data.get('listing_id')
-        action = data.get('action')  # 'like', 'dislike', or 'neutral'/'skip'
+        action = data.get('action')  # 'like', 'dislike', or 'neutral'
 
         # Validate action
-        valid_actions = ['like', 'dislike', 'neutral', 'skip']
+        valid_actions = ['like', 'dislike', 'neutral']
         if action not in valid_actions:
             return jsonify({'error': f'Invalid action. Must be one of: {", ".join(valid_actions)}'}), 400
 
@@ -174,7 +174,7 @@ def record_swipe():
 
         liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
         disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
-        neutral_count = len([s for s in session['swipes'] if s['action'] in ['neutral', 'skip']])
+        neutral_count = len([s for s in session['swipes'] if s['action'] == 'neutral'])
         
         print(f"📊 Session {session_id}: +{liked_count} likes, -{disliked_count} dislikes, ~{neutral_count} skips")
 
@@ -202,7 +202,7 @@ def get_session_info(session_id):
     session = swipe_sessions[session_id]
     liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
     disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
-    neutral_count = len([s for s in session['swipes'] if s['action'] in ['neutral', 'skip']])
+    neutral_count = len([s for s in session['swipes'] if s['action'] == 'neutral'])
 
     return jsonify({
         'exists': True,
