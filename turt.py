@@ -55,6 +55,37 @@ def get_random_listings(count):
         return jsonify({'error': str(e)}), 500
 
 
+# NEW: Get random listings by category
+@app.route('/api/listings/random/<category>/<int:count>', methods=['GET'])
+def get_random_listings_by_category(category, count):
+    """Get random listings from a specific category"""
+    try:
+        # Validate category
+        valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
+        if category not in valid_categories:
+            return jsonify({
+                'error': f'Invalid category. Must be one of: {", ".join(valid_categories)}'
+            }), 400
+        
+        listings = list(collection.aggregate([
+            {'$match': {'category': category}},
+            {'$sample': {'size': count}}
+        ]))
+        
+        for listing in listings:
+            listing['_id'] = str(listing['_id'])
+        
+        return jsonify({
+            'category': category,
+            'count': len(listings),
+            'products': listings
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     """Get statistics about the listings database"""
@@ -76,7 +107,7 @@ def get_stats():
         ])
 
         return jsonify({
-            'total_listings': total_count,
+            'count': total_count,
             'brands': list(brands),
             'price_stats': list(price_stats)
         }), 200
@@ -161,14 +192,18 @@ def get_recommendations():
             return jsonify({
                 'error': 'No liked items yet. Swipe right on at least one item!'
             }), 400
-
-        print(
-            f"🤖 Getting AI recommendations for {len(liked_items)} liked items WITH IMAGE ANALYSIS...")
-
+        
+        # Get category from first liked item (all should be same category)
+        user_category = liked_items[0].get('category') if liked_items else None
+        
+        print(f"🤖 Getting AI recommendations for {len(liked_items)} liked items in category: {user_category}")
+        
         liked_items_text = format_for_ai(liked_items)
-        recommendations = get_ai_recommendations(liked_items_text, liked_items)
-
+        recommendations = get_ai_recommendations(liked_items_text, liked_items, user_category)
+        
         return jsonify({
+            'category': user_category,
+            'liked_count': len(liked_items),
             'count': len(recommendations),
             'products': recommendations
         }), 200
@@ -267,8 +302,7 @@ def format_for_ai(liked_items):
     for idx, item in enumerate(liked_items, 1):
         formatted_text += f"""Item #{idx}:
 - Name: {item.get('name', 'Unknown')}
-- Brand: {item.get('brand', 'Various')}
-- Category: {item.get('style', 'Unknown')}
+- Category: {item.get('category', 'Unknown')}
 - Size: {item.get('size', 'Various')}
 - Price: ${item.get('price', 0):.2f}
 ---
@@ -276,17 +310,22 @@ def format_for_ai(liked_items):
 
     return formatted_text
 
-
-def get_ai_recommendations(liked_items_text, liked_items):
+def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
     """Get recommendations from Gemini via OpenRouter with IMAGE ANALYSIS"""
-
-    all_listings = list(collection.find({}))
-
+    
+    # FILTER BY CATEGORY
+    if user_category:
+        all_listings = list(collection.find({'category': user_category}))
+        print(f"  🔍 Filtering to category: {user_category} ({len(all_listings)} items)")
+    else:
+        all_listings = list(collection.find({}))
+        print(f"  🔍 No category filter - using all {len(all_listings)} items")
+    
     # Create simpler text list of available items
     all_items_text = "AVAILABLE ITEMS (return IDs from this list):\n\n"
     for item in all_listings:
-        all_items_text += f"ID: {str(item['_id'])} | {item.get('name', 'Unknown')} | {item.get('brand', 'Various')} | ${item.get('price', 0):.2f}\n"
-
+        all_items_text += f"ID: {str(item['_id'])} | {item.get('name', 'Unknown')} | ${item.get('price', 0):.2f}\n"
+    
     # Download and encode images from liked items
     image_contents = []
     for idx, item in enumerate(liked_items, 1):
@@ -317,7 +356,7 @@ def get_ai_recommendations(liked_items_text, liked_items):
 
 {liked_items_text}
 
-Here are ALL AVAILABLE ITEMS in our database:
+Here are ALL AVAILABLE ITEMS in the SAME CATEGORY:
 
 {all_items_text}
 
@@ -330,7 +369,6 @@ Look for:
 - Similar graphic styles (vintage, minimalist, bold, etc.)
 - Similar visual aesthetic
 - Similar price range
-- Similar categories
 
 CRITICAL: Return ONLY a comma-separated list of MongoDB IDs (24-character hex strings).
 NO explanations, NO extra text.
