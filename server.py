@@ -45,9 +45,10 @@ app.json_encoder = JSONEncoder
 
 @app.route('/api/listings/random/<int:count>', methods=['GET'])
 def get_random_listings(count):
-    """Get random listings with optional category filter"""
+    """Get random listings with optional category filter - excludes already shown items"""
     try:
         category = request.args.get('category')
+        session_id = request.args.get('session_id', 'default')
         
         # Build query
         query = {}
@@ -59,13 +60,32 @@ def get_random_listings(count):
                 }), 400
             query['category'] = category
         
+        # Exclude already shown items
+        if session_id in swipe_sessions:
+            shown_items = swipe_sessions[session_id].get('shown_items', set())
+            if shown_items:
+                query['_id'] = {'$nin': [ObjectId(item_id) for item_id in shown_items]}
+                print(f"  🚫 Excluding {len(shown_items)} already shown items")
+        
         listings = list(collection.aggregate([
             {'$match': query},
             {'$sample': {'size': count}}
         ]))
 
+        # Track these items as shown
+        if session_id not in swipe_sessions:
+            swipe_sessions[session_id] = {
+                'swipes': [],
+                'tag_weights': {},
+                'shown_items': set()
+            }
+        
         for listing in listings:
-            listing['_id'] = str(listing['_id'])
+            listing_id = str(listing['_id'])
+            swipe_sessions[session_id]['shown_items'].add(listing_id)
+            listing['_id'] = listing_id
+
+        print(f"  📊 Showing {len(listings)} new items (total shown: {len(swipe_sessions[session_id]['shown_items'])})")
 
         return jsonify({
             'category': category,
@@ -99,12 +119,17 @@ def get_stats():
 
 @app.route('/api/swipe', methods=['POST'])
 def record_swipe():
-    """Record user's swipe and update tag weights"""
+    """Record user's swipe and update tag weights - handles like/dislike/neutral"""
     try:
         data = request.json
         session_id = data.get('session_id', 'default')
         listing_id = data.get('listing_id')
-        action = data.get('action')  # 'like' or 'dislike'
+        action = data.get('action')  # 'like', 'dislike', or 'neutral'/'skip'
+
+        # Validate action
+        valid_actions = ['like', 'dislike', 'neutral', 'skip']
+        if action not in valid_actions:
+            return jsonify({'error': f'Invalid action. Must be one of: {", ".join(valid_actions)}'}), 400
 
         listing = collection.find_one({'_id': ObjectId(listing_id)})
 
@@ -117,10 +142,14 @@ def record_swipe():
         if session_id not in swipe_sessions:
             swipe_sessions[session_id] = {
                 'swipes': [],
-                'tag_weights': {}
+                'tag_weights': {},
+                'shown_items': set()
             }
         
         session = swipe_sessions[session_id]
+
+        # Mark item as shown
+        session['shown_items'].add(listing_id)
 
         # Record swipe
         session['swipes'].append({
@@ -128,7 +157,7 @@ def record_swipe():
             'action': action
         })
         
-        # Update tag weights
+        # Update tag weights based on action
         item_tags = listing.get('tags', [])
         
         if action == 'like':
@@ -137,6 +166,7 @@ def record_swipe():
         elif action == 'dislike':
             for tag in item_tags:
                 session['tag_weights'][tag] = session['tag_weights'].get(tag, 0) - 0.05
+        # Neutral/skip: no weight change, but still tracked
         
         # Keep weights between 0 and 1
         for tag in session['tag_weights']:
@@ -144,13 +174,16 @@ def record_swipe():
 
         liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
         disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
+        neutral_count = len([s for s in session['swipes'] if s['action'] in ['neutral', 'skip']])
         
-        print(f"📊 Session {session_id}: +{liked_count} likes, -{disliked_count} dislikes")
+        print(f"📊 Session {session_id}: +{liked_count} likes, -{disliked_count} dislikes, ~{neutral_count} skips")
 
         return jsonify({
             'total_swipes': len(session['swipes']),
             'liked_count': liked_count,
             'disliked_count': disliked_count,
+            'neutral_count': neutral_count,
+            'shown_count': len(session['shown_items']),
             'can_get_recommendations': liked_count >= 1
         }), 200
 
@@ -169,18 +202,35 @@ def get_session_info(session_id):
     session = swipe_sessions[session_id]
     liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
     disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
+    neutral_count = len([s for s in session['swipes'] if s['action'] in ['neutral', 'skip']])
 
     return jsonify({
         'exists': True,
         'swipes': len(session['swipes']),
         'liked': liked_count,
         'disliked': disliked_count,
+        'neutral': neutral_count,
+        'shown': len(session.get('shown_items', set())),
         'can_get_recommendations': liked_count >= 1
     }), 200
 
+@app.route('/api/session/<session_id>/reset', methods=['POST'])
+def reset_session(session_id):
+    """Reset a swipe session (clear history)"""
+    if session_id in swipe_sessions:
+        del swipe_sessions[session_id]
+        return jsonify({
+            'success': True,
+            'message': f'Session {session_id} reset'
+        }), 200
+    return jsonify({
+        'success': False,
+        'message': 'Session not found'
+    }), 404
+
 @app.route('/api/recommendations', methods=['POST'])
 def get_recommendations():
-    """Get AI-powered visual recommendations using Gemini - with optional category filter"""
+    """Get AI-powered visual recommendations using Gemini - with optional category filter and duplicate prevention"""
     try:
         data = request.json
         session_id = data.get('session_id', 'default')
@@ -202,7 +252,12 @@ def get_recommendations():
         print(f"🤖 Getting AI recommendations for {len(liked_items)} liked items in category: {category}")
         
         liked_items_text = format_for_ai(liked_items)
-        recommendations = get_ai_recommendations(liked_items_text, liked_items, category)
+        shown_items = session.get('shown_items', set())
+        recommendations = get_ai_recommendations(liked_items_text, liked_items, category, shown_items)
+        
+        # Mark recommendations as shown
+        for rec in recommendations:
+            session['shown_items'].add(rec['_id'])
         
         return jsonify({
             'category': category,
@@ -234,8 +289,8 @@ def format_for_ai(liked_items):
 
     return formatted_text
 
-def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
-    """Get recommendations from Gemini via OpenRouter with IMAGE ANALYSIS"""
+def get_ai_recommendations(liked_items_text, liked_items, user_category=None, exclude_shown=None):
+    """Get recommendations from Gemini via OpenRouter with IMAGE ANALYSIS - excludes shown items"""
     
     # Build query
     query = {}
@@ -243,8 +298,17 @@ def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
         query['category'] = user_category
         print(f"  🔍 Filtering to category: {user_category}")
     
+    # Exclude items that have already been shown
+    if exclude_shown and len(exclude_shown) > 0:
+        query['_id'] = {'$nin': [ObjectId(item_id) for item_id in exclude_shown]}
+        print(f"  🚫 Excluding {len(exclude_shown)} already shown items")
+    
     all_listings = list(collection.find(query))
-    print(f"  📊 Found {len(all_listings)} items to analyze")
+    print(f"  📊 Found {len(all_listings)} NEW items to analyze")
+    
+    if len(all_listings) == 0:
+        print("  ⚠️ No new items available - user has seen everything!")
+        return []
     
     # Create text list of available items
     all_items_text = "AVAILABLE ITEMS (return IDs from this list):\n\n"
@@ -279,7 +343,7 @@ def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
 
 {liked_items_text}
 
-Here are ALL AVAILABLE ITEMS{' in the SAME CATEGORY' if user_category else ''}:
+Here are ALL AVAILABLE ITEMS{' in the SAME CATEGORY' if user_category else ''} (EXCLUDING items already shown):
 
 {all_items_text}
 
@@ -339,7 +403,7 @@ Return the IDs now:"""
                 print(f"  ⚠️ Could not fetch {id_str}: {e}")
                 continue
 
-        print(f"\n✅ Returning {len(recommendations)} recommendations\n")
+        print(f"\n✅ Returning {len(recommendations)} NEW recommendations\n")
         return recommendations
 
     except Exception as e:
