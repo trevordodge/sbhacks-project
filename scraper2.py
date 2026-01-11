@@ -9,11 +9,13 @@ from bs4 import BeautifulSoup
 from pymongo import MongoClient
 import time
 import re
+from dotenv import load_dotenv
+load_dotenv()
 
 def connect_to_db():
     """Connect to MongoDB Atlas"""
     # MongoDB Atlas connection string
-    MONGODB_URI = "mongodb+srv://thrifttinder:poopshit69@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
+    MONGODB_URI = os.getenv('MONGODB_URI')
     client = MongoClient(MONGODB_URI)
     
     db = client['thrifttinderDB']

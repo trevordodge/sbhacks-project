@@ -3,9 +3,11 @@ from openai import OpenAI
 import requests
 import base64
 import time
+from dotenv import load_dotenv
+load_dotenv()
 
 # MongoDB connection
-MONGODB_URI = "mongodb+srv://thrifttinder:fishstick1212@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_URI = os.getenv('MONGODB_URI')
 client = MongoClient(MONGODB_URI)
 db = client['thrifttinderDB']
 collection = db['listings']
@@ -13,7 +15,7 @@ collection = db['listings']
 # OpenRouter client
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="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"  # Replace with your new key!
+    api_key=os.getenv('OPENROUTER_API_KEY')
 )
 
 def enhance_item_with_ai(item):

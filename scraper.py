@@ -9,9 +9,11 @@ from bs4 import BeautifulSoup
 from pymongo import MongoClient
 import time
 import re
+from dotenv import load_dotenv
+load_dotenv()
 
 # MongoDB connection
-MONGODB_URI = "mongodb+srv://thrifttinder:fishstick1212@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_URI = os.getenv('MONGODB_URI')
 client = MongoClient(MONGODB_URI)
 db = client['thrifttinderDB']
 collection = db['listings']
