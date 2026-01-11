@@ -11,6 +11,11 @@ import time
 def scrape_depop(url):
     # Set up Chrome options for headless mode
     chrome_options = Options()
+
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled") 
+chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"]) 
+chrome_options.add_experimental_option("useAutomationExtension", False) 
+chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     chrome_options.add_argument('--headless')  # Run without GUI
     chrome_options.add_argument('--no-sandbox')  # Bypass OS security model
     chrome_options.add_argument('--disable-dev-shm-usage')  # Overcome limited resource problems
@@ -83,15 +88,25 @@ def scrape_depop(url):
                     if product_url and not product_url.startswith('http'):
                         product_url = 'https://www.depop.com' + product_url
                 
-                # Try multiple ways to find price
                 price = 'N/A'
                 
                 # Method 1: Look in parent link
                 if parent_link:
+<<<<<<< Updated upstream
                     price_elem = parent_link.select_one('.styles_price__H8qdh:not(.styles_discountedFullPrice__JTi1d)')
                     if price_elem:
+=======
+                    
+                    all_prices = parent_link.find_all(class_='styles_price__H8qdh')
+                    for price_elem in all_prices:
+                        aria_label = price_elem.get('aria-label', '')
+                    
+                    # We want the price we pay.
+                    # So we accept "Price" or "Discounted price", but NOT "Full price".
+                    if aria_label in ["Price", "Discounted price"]:
+>>>>>>> Stashed changes
                         price = price_elem.text.strip()
-                
+                                
                 # Method 2: Look in siblings or nearby elements
                 if price == 'N/A':
                     # Go up multiple levels to find a container
