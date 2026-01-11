@@ -170,8 +170,15 @@ def scrape_depop(url):
 
 
 # Run the scraper
-url = "https://www.depop.com/category/mens/tops/tshirts/?moduleOrigin=meganav"
-results = scrape_depop(url)
+urls = [
+    "https://www.depop.com/category/mens/tops/tshirts/?moduleOrigin=meganav",
+    "https://www.depop.com/category/womens/tops/?moduleOrigin=meganav",
+    "https://www.depop.com/category/mens/bottoms/jeans/?moduleOrigin=meganav", 
+    "https://www.depop.com/category/womens/bottoms/skirts/?moduleOrigin=meganav"
+]
+
+for url in urls:
+    results = scrape_depop(url)
 
 if results:
     print(f"\n{'='*50}")
