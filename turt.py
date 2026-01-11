@@ -13,7 +13,7 @@ app = Flask(__name__)
 CORS(app)
 
 # MongoDB connection
-MONGODB_URI = "mongodb+srv://thrifttinder:poopshit69@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_URI = "mongodb+srv://thrifttinder:fishstick1212@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(MONGODB_URI)
 db = client['thrifttinderDB']
 collection = db['listings']
