@@ -13,9 +13,9 @@ def scrape_depop(url):
     chrome_options = Options()
 
     chrome_options.add_argument("--disable-blink-features=AutomationControlled") 
-chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"]) 
-chrome_options.add_experimental_option("useAutomationExtension", False) 
-chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"]) 
+    chrome_options.add_experimental_option("useAutomationExtension", False) 
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     chrome_options.add_argument('--headless')  # Run without GUI
     chrome_options.add_argument('--no-sandbox')  # Bypass OS security model
     chrome_options.add_argument('--disable-dev-shm-usage')  # Overcome limited resource problems
@@ -151,6 +151,7 @@ chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64
             print(f"  Price: {product['price']}")
             print(f"  Size: {product['size']}")
             print(f"  URL: {product['url']}")
+            print(f"  IMG: {product['image']}")
             # Optional: print(f"  Image: {product['image']}")
             print("-" * 50)
         
