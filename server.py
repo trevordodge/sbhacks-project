@@ -7,6 +7,7 @@ import requests
 import base64
 import os
 from dotenv import load_dotenv
+import re
 
 from flask_cors import CORS
 
@@ -29,7 +30,6 @@ openrouter_client = OpenAI(
 )
 
 # Swipe session storage
-# Structure: {session_id: {category: str, swipes: [], tag_weights: {}}}
 swipe_sessions = {}
 
 # Custom JSON encoder to handle ObjectId
@@ -41,98 +41,38 @@ class JSONEncoder(json.JSONEncoder):
 
 app.json_encoder = JSONEncoder
 
-# ===== SESSION MANAGEMENT =====
-
-@app.route('/api/session/start', methods=['POST'])
-def start_session():
-    """Start a new session with category selection"""
-    try:
-        data = request.json
-        category = data.get('category')
-        
-        # Validate category
-        valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
-        if not category or category not in valid_categories:
-            return jsonify({
-                'error': f'Invalid category. Must be one of: {", ".join(valid_categories)}'
-            }), 400
-        
-        # Generate session ID
-        session_id = data.get('session_id', f"session_{len(swipe_sessions) + 1}")
-        
-        # Initialize session
-        swipe_sessions[session_id] = {
-            'category': category,
-            'swipes': [],
-            'tag_weights': {}
-        }
-        
-        # Get initial random items
-        initial_items = list(collection.aggregate([
-            {'$match': {'category': category}},
-            {'$sample': {'size': 5}}
-        ]))
-        
-        for item in initial_items:
-            item['_id'] = str(item['_id'])
-        
-        print(f"✅ Started session {session_id} for category: {category}")
-        
-        return jsonify({
-            'session_id': session_id,
-            'category': category,
-            'count': len(initial_items),
-            'products': initial_items
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 # ===== LISTING ROUTES =====
 
 @app.route('/api/listings/random/<int:count>', methods=['GET'])
 def get_random_listings(count):
-    """Get random listings for swiping (Tinder-style)"""
+    """Get random listings with optional category filter"""
     try:
+        category = request.args.get('category')
+        
+        # Build query
+        query = {}
+        if category:
+            valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
+            if category not in valid_categories:
+                return jsonify({
+                    'error': f'Invalid category. Must be one of: {", ".join(valid_categories)}'
+                }), 400
+            query['category'] = category
+        
         listings = list(collection.aggregate([
+            {'$match': query},
             {'$sample': {'size': count}}
         ]))
 
         for listing in listings:
             listing['_id'] = str(listing['_id'])
 
-        return jsonify({
-            'count': len(listings),
-            'products': listings
-        }), 200
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/listings/random/<category>/<int:count>', methods=['GET'])
-def get_random_listings_by_category(category, count):
-    """Get random listings from a specific category"""
-    try:
-        valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
-        if category not in valid_categories:
-            return jsonify({
-                'error': f'Invalid category. Must be one of: {", ".join(valid_categories)}'
-            }), 400
-        
-        listings = list(collection.aggregate([
-            {'$match': {'category': category}},
-            {'$sample': {'size': count}}
-        ]))
-        
-        for listing in listings:
-            listing['_id'] = str(listing['_id'])
-        
         return jsonify({
             'category': category,
             'count': len(listings),
             'products': listings
         }), 200
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -162,14 +102,9 @@ def record_swipe():
     """Record user's swipe and update tag weights"""
     try:
         data = request.json
-        session_id = data.get('session_id')
+        session_id = data.get('session_id', 'default')
         listing_id = data.get('listing_id')
         action = data.get('action')  # 'like' or 'dislike'
-
-        if session_id not in swipe_sessions:
-            return jsonify({
-                'error': 'Session not found. Start a session first with /api/session/start'
-            }), 404
 
         listing = collection.find_one({'_id': ObjectId(listing_id)})
 
@@ -177,6 +112,13 @@ def record_swipe():
             return jsonify({'error': 'Listing not found'}), 404
 
         listing['_id'] = str(listing['_id'])
+        
+        # Initialize session if needed
+        if session_id not in swipe_sessions:
+            swipe_sessions[session_id] = {
+                'swipes': [],
+                'tag_weights': {}
+            }
         
         session = swipe_sessions[session_id]
 
@@ -190,11 +132,9 @@ def record_swipe():
         item_tags = listing.get('tags', [])
         
         if action == 'like':
-            # Increase weight for each tag
             for tag in item_tags:
                 session['tag_weights'][tag] = session['tag_weights'].get(tag, 0) + 0.1
         elif action == 'dislike':
-            # Decrease weight for each tag
             for tag in item_tags:
                 session['tag_weights'][tag] = session['tag_weights'].get(tag, 0) - 0.05
         
@@ -206,14 +146,12 @@ def record_swipe():
         disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
         
         print(f"📊 Session {session_id}: +{liked_count} likes, -{disliked_count} dislikes")
-        print(f"🏷️  Top tags: {dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:5])}")
 
         return jsonify({
             'total_swipes': len(session['swipes']),
             'liked_count': liked_count,
             'disliked_count': disliked_count,
-            'can_get_recommendations': liked_count >= 1,
-            'top_tags': dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:5])
+            'can_get_recommendations': liked_count >= 1
         }), 200
 
     except Exception as e:
@@ -234,23 +172,22 @@ def get_session_info(session_id):
 
     return jsonify({
         'exists': True,
-        'category': session['category'],
         'swipes': len(session['swipes']),
         'liked': liked_count,
         'disliked': disliked_count,
-        'tag_weights': dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:10]),
         'can_get_recommendations': liked_count >= 1
     }), 200
 
 @app.route('/api/recommendations', methods=['POST'])
 def get_recommendations():
-    """Get tag-weighted recommendations (no AI cost - using pre-generated tags)"""
+    """Get AI-powered visual recommendations using Gemini - with optional category filter"""
     try:
         data = request.json
-        session_id = data.get('session_id')
+        session_id = data.get('session_id', 'default')
+        category = data.get('category')  # Optional category filter
 
         if session_id not in swipe_sessions:
-            return jsonify({'error': 'Session not found'}), 404
+            return jsonify({'error': 'No swipe history found'}), 404
 
         session = swipe_sessions[session_id]
         liked_items = [s['listing'] for s in session['swipes'] if s['action'] == 'like']
@@ -258,48 +195,17 @@ def get_recommendations():
         if len(liked_items) == 0:
             return jsonify({'error': 'No liked items yet'}), 400
         
-        user_category = session['category']
-        tag_weights = session['tag_weights']
+        # Use provided category or infer from first liked item
+        if not category:
+            category = liked_items[0].get('category')
         
-        print(f"🎯 Getting recommendations for category: {user_category}")
-        print(f"🏷️  Tag weights: {dict(sorted(tag_weights.items(), key=lambda x: x[1], reverse=True)[:5])}")
+        print(f"🤖 Getting AI recommendations for {len(liked_items)} liked items in category: {category}")
         
-        # Get all items from same category (excluding already swiped)
-        swiped_ids = [s['listing']['_id'] for s in session['swipes']]
-        
-        available_items = list(collection.find({
-            'category': user_category,
-            '_id': {'$nin': [ObjectId(id) for id in swiped_ids]}
-        }))
-        
-        # Score each item based on tag overlap
-        scored_items = []
-        for item in available_items:
-            item_tags = item.get('tags', [])
-            
-            # Calculate score
-            score = 0
-            for tag in item_tags:
-                score += tag_weights.get(tag, 0)
-            
-            # Average score
-            if item_tags:
-                score = score / len(item_tags)
-            
-            scored_items.append((score, item))
-        
-        # Sort by score and get top 10
-        scored_items.sort(reverse=True, key=lambda x: x[0])
-        recommendations = [item for score, item in scored_items[:10]]
-        
-        # Convert ObjectId to string
-        for item in recommendations:
-            item['_id'] = str(item['_id'])
-        
-        print(f"✅ Returning {len(recommendations)} recommendations")
+        liked_items_text = format_for_ai(liked_items)
+        recommendations = get_ai_recommendations(liked_items_text, liked_items, category)
         
         return jsonify({
-            'category': user_category,
+            'category': category,
             'liked_count': len(liked_items),
             'count': len(recommendations),
             'products': recommendations
@@ -311,7 +217,7 @@ def get_recommendations():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# ===== AI HELPER FUNCTIONS (for backup/fallback) =====
+# ===== AI HELPER FUNCTIONS =====
 
 def format_for_ai(liked_items):
     """Format liked items for AI"""
@@ -327,6 +233,120 @@ def format_for_ai(liked_items):
 """
 
     return formatted_text
+
+def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
+    """Get recommendations from Gemini via OpenRouter with IMAGE ANALYSIS"""
+    
+    # Build query
+    query = {}
+    if user_category:
+        query['category'] = user_category
+        print(f"  🔍 Filtering to category: {user_category}")
+    
+    all_listings = list(collection.find(query))
+    print(f"  📊 Found {len(all_listings)} items to analyze")
+    
+    # Create text list of available items
+    all_items_text = "AVAILABLE ITEMS (return IDs from this list):\n\n"
+    for item in all_listings:
+        all_items_text += f"ID: {str(item['_id'])} | {item.get('name', 'Unknown')} | ${item.get('price', 0):.2f}\n"
+    
+    # Download and encode images from liked items
+    image_contents = []
+    for idx, item in enumerate(liked_items, 1):
+        image_url = item.get('image', '')
+        if image_url:
+            try:
+                print(f"  📸 Downloading image {idx}: {image_url[:50]}...")
+                response = requests.get(image_url, timeout=10)
+                if response.status_code == 200:
+                    image_base64 = base64.b64encode(response.content).decode('utf-8')
+                    image_contents.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        }
+                    })
+                    print(f"    ✅ Image {idx} loaded")
+            except Exception as e:
+                print(f"    ⚠️ Could not load image {idx}: {e}")
+
+    # Build message with images + text
+    message_content = [
+        {
+            "type": "text",
+            "text": f"""These are the items the user LIKED (with images):
+
+{liked_items_text}
+
+Here are ALL AVAILABLE ITEMS{' in the SAME CATEGORY' if user_category else ''}:
+
+{all_items_text}
+
+Analyze the VISUAL style of the liked items (colors, graphics, patterns, aesthetic) and the text descriptions including tags.
+
+Based on both the images and descriptions, recommend 10 similar items from the available list.
+
+Look for:
+- Similar color palettes
+- Similar graphic styles (vintage, minimalist, bold, etc.)
+- Similar visual aesthetic
+- Similar price range
+- Similar tags/style attributes
+
+CRITICAL: Return ONLY a comma-separated list of MongoDB IDs (24-character hex strings).
+NO explanations, NO extra text.
+
+Example format: 6962e11fca3dce721a6185d9,6962e11fca3dce721a61861a
+
+Return the IDs now:"""
+        }
+    ]
+
+    # Add all images to the message
+    message_content.extend(image_contents)
+
+    try:
+        print(f"\n🤖 Sending {len(image_contents)} images + text to Gemini for analysis...")
+
+        completion = openrouter_client.chat.completions.create(
+            model="google/gemini-2.5-flash",
+            messages=[
+                {
+                    "role": "user",
+                    "content": message_content
+                }
+            ]
+        )
+
+        response_text = completion.choices[0].message.content.strip()
+        print(f"\n🤖 AI RESPONSE:\n{response_text[:200]}...\n")
+
+        # Extract IDs using regex
+        found_ids = re.findall(r'[a-f0-9]{24}', response_text)
+
+        print(f"📝 Found {len(found_ids)} potential IDs")
+
+        recommendations = []
+        for id_str in found_ids[:10]:
+            try:
+                listing = collection.find_one({'_id': ObjectId(id_str)})
+                if listing:
+                    listing['_id'] = str(listing['_id'])
+                    recommendations.append(listing)
+                    print(f"  ✅ Added: {listing.get('name', 'Unknown')[:40]}")
+            except Exception as e:
+                print(f"  ⚠️ Could not fetch {id_str}: {e}")
+                continue
+
+        print(f"\n✅ Returning {len(recommendations)} recommendations\n")
+        return recommendations
+
+    except Exception as e:
+        print(f"❌ AI API Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 if __name__ == '__main__':
     print("🚀 ThriftTinder API starting...")
