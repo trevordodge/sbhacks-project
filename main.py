@@ -92,19 +92,8 @@ chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64
                 
                 # Method 1: Look in parent link
                 if parent_link:
-<<<<<<< Updated upstream
                     price_elem = parent_link.select_one('.styles_price__H8qdh:not(.styles_discountedFullPrice__JTi1d)')
                     if price_elem:
-=======
-                    
-                    all_prices = parent_link.find_all(class_='styles_price__H8qdh')
-                    for price_elem in all_prices:
-                        aria_label = price_elem.get('aria-label', '')
-                    
-                    # We want the price we pay.
-                    # So we accept "Price" or "Discounted price", but NOT "Full price".
-                    if aria_label in ["Price", "Discounted price"]:
->>>>>>> Stashed changes
                         price = price_elem.text.strip()
                                 
                 # Method 2: Look in siblings or nearby elements
