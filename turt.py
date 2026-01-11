@@ -5,15 +5,19 @@ from openai import OpenAI
 import json
 import requests
 import base64
-from io import BytesIO
+import os
+from dotenv import load_dotenv
 
 from flask_cors import CORS
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
 # MongoDB connection
-MONGODB_URI = "mongodb+srv://thrifttinder:fishstick1212@sbhacks.nqf2fze.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_URI = os.getenv('MONGODB_URI')
 client = MongoClient(MONGODB_URI)
 db = client['thrifttinderDB']
 collection = db['listings']
@@ -21,10 +25,11 @@ collection = db['listings']
 # OpenRouter client for AI
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="bajeesuz"
+    api_key=os.getenv('OPENROUTER_API_KEY')
 )
 
-# Swipe session storage (in production, use MongoDB)
+# Swipe session storage
+# Structure: {session_id: {category: str, swipes: [], tag_weights: {}}}
 swipe_sessions = {}
 
 # Custom JSON encoder to handle ObjectId
@@ -33,7 +38,57 @@ class JSONEncoder(json.JSONEncoder):
         if isinstance(obj, ObjectId):
             return str(obj)
         return super().default(obj)
+
 app.json_encoder = JSONEncoder
+
+# ===== SESSION MANAGEMENT =====
+
+@app.route('/api/session/start', methods=['POST'])
+def start_session():
+    """Start a new session with category selection"""
+    try:
+        data = request.json
+        category = data.get('category')
+        
+        # Validate category
+        valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
+        if not category or category not in valid_categories:
+            return jsonify({
+                'error': f'Invalid category. Must be one of: {", ".join(valid_categories)}'
+            }), 400
+        
+        # Generate session ID
+        session_id = data.get('session_id', f"session_{len(swipe_sessions) + 1}")
+        
+        # Initialize session
+        swipe_sessions[session_id] = {
+            'category': category,
+            'swipes': [],
+            'tag_weights': {}
+        }
+        
+        # Get initial random items
+        initial_items = list(collection.aggregate([
+            {'$match': {'category': category}},
+            {'$sample': {'size': 5}}
+        ]))
+        
+        for item in initial_items:
+            item['_id'] = str(item['_id'])
+        
+        print(f"✅ Started session {session_id} for category: {category}")
+        
+        return jsonify({
+            'session_id': session_id,
+            'category': category,
+            'count': len(initial_items),
+            'products': initial_items
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ===== LISTING ROUTES =====
 
 @app.route('/api/listings/random/<int:count>', methods=['GET'])
 def get_random_listings(count):
@@ -54,13 +109,10 @@ def get_random_listings(count):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
-# NEW: Get random listings by category
 @app.route('/api/listings/random/<category>/<int:count>', methods=['GET'])
 def get_random_listings_by_category(category, count):
     """Get random listings from a specific category"""
     try:
-        # Validate category
         valid_categories = ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]
         if category not in valid_categories:
             return jsonify({
@@ -82,47 +134,42 @@ def get_random_listings_by_category(category, count):
         }), 200
     
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     """Get statistics about the listings database"""
     try:
         total_count = collection.count_documents({})
-
-        brands = collection.aggregate([
-            {'$group': {'_id': '$brand', 'count': {'$sum': 1}}},
-            {'$sort': {'count': -1}}
-        ])
-
-        price_stats = collection.aggregate([
-            {'$group': {
-                '_id': None,
-                'avg_price': {'$avg': '$price'},
-                'min_price': {'$min': '$price'},
-                'max_price': {'$max': '$price'}
-            }}
-        ])
+        
+        # Category breakdown
+        category_stats = []
+        for category in ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]:
+            count = collection.count_documents({"category": category})
+            category_stats.append({"category": category, "count": count})
 
         return jsonify({
             'count': total_count,
-            'brands': list(brands),
-            'price_stats': list(price_stats)
+            'categories': category_stats
         }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ===== NEW AI-POWERED ROUTES =====
+# ===== SWIPE & RECOMMENDATION ROUTES =====
+
 @app.route('/api/swipe', methods=['POST'])
 def record_swipe():
-    """Record user's swipe (like/dislike)"""
+    """Record user's swipe and update tag weights"""
     try:
         data = request.json
-        session_id = data.get('session_id', 'default')
+        session_id = data.get('session_id')
         listing_id = data.get('listing_id')
         action = data.get('action')  # 'like' or 'dislike'
+
+        if session_id not in swipe_sessions:
+            return jsonify({
+                'error': 'Session not found. Start a session first with /api/session/start'
+            }), 404
 
         listing = collection.find_one({'_id': ObjectId(listing_id)})
 
@@ -130,76 +177,126 @@ def record_swipe():
             return jsonify({'error': 'Listing not found'}), 404
 
         listing['_id'] = str(listing['_id'])
+        
+        session = swipe_sessions[session_id]
 
-        if session_id not in swipe_sessions:
-            swipe_sessions[session_id] = []
-
-        swipe_sessions[session_id].append({
+        # Record swipe
+        session['swipes'].append({
             'listing': listing,
             'action': action
         })
+        
+        # Update tag weights
+        item_tags = listing.get('tags', [])
+        
+        if action == 'like':
+            # Increase weight for each tag
+            for tag in item_tags:
+                session['tag_weights'][tag] = session['tag_weights'].get(tag, 0) + 0.1
+        elif action == 'dislike':
+            # Decrease weight for each tag
+            for tag in item_tags:
+                session['tag_weights'][tag] = session['tag_weights'].get(tag, 0) - 0.05
+        
+        # Keep weights between 0 and 1
+        for tag in session['tag_weights']:
+            session['tag_weights'][tag] = max(0, min(1, session['tag_weights'][tag]))
 
-        liked_count = len(
-            [s for s in swipe_sessions[session_id] if s['action'] == 'like'])
+        liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
+        disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
+        
+        print(f"📊 Session {session_id}: +{liked_count} likes, -{disliked_count} dislikes")
+        print(f"🏷️  Top tags: {dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:5])}")
 
         return jsonify({
-            'total_swipes': len(swipe_sessions[session_id]),
+            'total_swipes': len(session['swipes']),
             'liked_count': liked_count,
-            'can_get_recommendations': liked_count >= 1
+            'disliked_count': disliked_count,
+            'can_get_recommendations': liked_count >= 1,
+            'top_tags': dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:5])
         }), 200
 
     except Exception as e:
+        print(f"❌ Error in swipe: {e}")
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/session/<session_id>', methods=['GET'])
 def get_session_info(session_id):
     """Get info about a swipe session"""
     if session_id not in swipe_sessions:
         return jsonify({
-            'exists': False,
-            'swipes': 0,
-            'liked': 0
+            'exists': False
         }), 200
 
-    swipes = swipe_sessions[session_id]
-    liked_count = len([s for s in swipes if s['action'] == 'like'])
+    session = swipe_sessions[session_id]
+    liked_count = len([s for s in session['swipes'] if s['action'] == 'like'])
+    disliked_count = len([s for s in session['swipes'] if s['action'] == 'dislike'])
 
     return jsonify({
         'exists': True,
-        'swipes': len(swipes),
+        'category': session['category'],
+        'swipes': len(session['swipes']),
         'liked': liked_count,
+        'disliked': disliked_count,
+        'tag_weights': dict(sorted(session['tag_weights'].items(), key=lambda x: x[1], reverse=True)[:10]),
         'can_get_recommendations': liked_count >= 1
     }), 200
 
-
 @app.route('/api/recommendations', methods=['POST'])
 def get_recommendations():
-    """Get AI-powered recommendations based on swipe history"""
+    """Get tag-weighted recommendations (no AI cost - using pre-generated tags)"""
     try:
         data = request.json
-        session_id = data.get('session_id', 'default')
+        session_id = data.get('session_id')
 
         if session_id not in swipe_sessions:
-            return jsonify({
-                'error': 'No swipe history found'
-            }), 400
+            return jsonify({'error': 'Session not found'}), 404
 
-        liked_items = [s['listing']
-                       for s in swipe_sessions[session_id] if s['action'] == 'like']
+        session = swipe_sessions[session_id]
+        liked_items = [s['listing'] for s in session['swipes'] if s['action'] == 'like']
 
         if len(liked_items) == 0:
-            return jsonify({
-                'error': 'No liked items yet. Swipe right on at least one item!'
-            }), 400
+            return jsonify({'error': 'No liked items yet'}), 400
         
-        # Get category from first liked item (all should be same category)
-        user_category = liked_items[0].get('category') if liked_items else None
+        user_category = session['category']
+        tag_weights = session['tag_weights']
         
-        print(f"🤖 Getting AI recommendations for {len(liked_items)} liked items in category: {user_category}")
+        print(f"🎯 Getting recommendations for category: {user_category}")
+        print(f"🏷️  Tag weights: {dict(sorted(tag_weights.items(), key=lambda x: x[1], reverse=True)[:5])}")
         
-        liked_items_text = format_for_ai(liked_items)
-        recommendations = get_ai_recommendations(liked_items_text, liked_items, user_category)
+        # Get all items from same category (excluding already swiped)
+        swiped_ids = [s['listing']['_id'] for s in session['swipes']]
+        
+        available_items = list(collection.find({
+            'category': user_category,
+            '_id': {'$nin': [ObjectId(id) for id in swiped_ids]}
+        }))
+        
+        # Score each item based on tag overlap
+        scored_items = []
+        for item in available_items:
+            item_tags = item.get('tags', [])
+            
+            # Calculate score
+            score = 0
+            for tag in item_tags:
+                score += tag_weights.get(tag, 0)
+            
+            # Average score
+            if item_tags:
+                score = score / len(item_tags)
+            
+            scored_items.append((score, item))
+        
+        # Sort by score and get top 10
+        scored_items.sort(reverse=True, key=lambda x: x[0])
+        recommendations = [item for score, item in scored_items[:10]]
+        
+        # Convert ObjectId to string
+        for item in recommendations:
+            item['_id'] = str(item['_id'])
+        
+        print(f"✅ Returning {len(recommendations)} recommendations")
         
         return jsonify({
             'category': user_category,
@@ -209,91 +306,12 @@ def get_recommendations():
         }), 200
 
     except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/describe-likes', methods=['POST'])
-def describe_likes():
-    """Get AI descriptions of liked items based on their images"""
-    try:
-        data = request.json
-        session_id = data.get('session_id', 'default')
-
-        if session_id not in swipe_sessions:
-            return jsonify({'error': 'No swipe history'}), 400
-
-        liked_items = [s['listing']
-                       for s in swipe_sessions[session_id] if s['action'] == 'like']
-
-        if len(liked_items) == 0:
-            return jsonify({'error': 'No liked items'}), 400
-
-        print(f"🔍 Getting AI descriptions for {len(liked_items)} images...")
-
-        descriptions = []
-
-        for idx, item in enumerate(liked_items, 1):
-            image_url = item.get('image', '')
-            if not image_url:
-                continue
-
-            try:
-                # Download image
-                response = requests.get(image_url, timeout=10)
-                if response.status_code == 200:
-                    image_base64 = base64.b64encode(
-                        response.content).decode('utf-8')
-
-                    # Ask Gemini to describe it
-                    completion = openrouter_client.chat.completions.create(
-                        model="google/gemini-2.5-flash",
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": """Describe this clothing item in detail. Include:
-- Main colors
-- Graphic/design elements
-- Style/aesthetic (vintage, modern, streetwear, etc.)
-- Notable features
-- Overall vibe
-
-Keep it concise (2-3 sentences)."""
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_base64}"
-                                    }
-                                }
-                            ]
-                        }]
-                    )
-
-                    description = completion.choices[0].message.content.strip()
-
-                    descriptions.append({
-                        'item_name': item.get('name'),
-                        'item_id': str(item.get('_id')),
-                        'ai_description': description,
-                        'image': image_url
-                    })
-
-                    print(f"  ✅ Item {idx}: {description[:60]}...")
-
-            except Exception as e:
-                print(f"  ⚠️ Error describing item {idx}: {e}")
-
-        return jsonify({
-            'count': len(descriptions),
-            'descriptions': descriptions
-        }), 200
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# ===== AI HELPER FUNCTIONS =====
-
+# ===== AI HELPER FUNCTIONS (for backup/fallback) =====
 
 def format_for_ai(liked_items):
     """Format liked items for AI"""
@@ -303,128 +321,22 @@ def format_for_ai(liked_items):
         formatted_text += f"""Item #{idx}:
 - Name: {item.get('name', 'Unknown')}
 - Category: {item.get('category', 'Unknown')}
-- Size: {item.get('size', 'Various')}
+- Tags: {', '.join(item.get('tags', []))}
 - Price: ${item.get('price', 0):.2f}
 ---
 """
 
     return formatted_text
 
-def get_ai_recommendations(liked_items_text, liked_items, user_category=None):
-    """Get recommendations from Gemini via OpenRouter with IMAGE ANALYSIS"""
-    
-    # FILTER BY CATEGORY
-    if user_category:
-        all_listings = list(collection.find({'category': user_category}))
-        print(f"  🔍 Filtering to category: {user_category} ({len(all_listings)} items)")
-    else:
-        all_listings = list(collection.find({}))
-        print(f"  🔍 No category filter - using all {len(all_listings)} items")
-    
-    # Create simpler text list of available items
-    all_items_text = "AVAILABLE ITEMS (return IDs from this list):\n\n"
-    for item in all_listings:
-        all_items_text += f"ID: {str(item['_id'])} | {item.get('name', 'Unknown')} | ${item.get('price', 0):.2f}\n"
-    
-    # Download and encode images from liked items
-    image_contents = []
-    for idx, item in enumerate(liked_items, 1):
-        image_url = item.get('image', '')
-        if image_url:
-            try:
-                print(f"  📸 Downloading image {idx}: {image_url[:50]}...")
-                response = requests.get(image_url, timeout=10)
-                if response.status_code == 200:
-                    # Convert to base64
-                    image_base64 = base64.b64encode(
-                        response.content).decode('utf-8')
-                    image_contents.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }
-                    })
-                    print(f"    ✅ Image {idx} loaded")
-            except Exception as e:
-                print(f"    ⚠️ Could not load image {idx}: {e}")
-
-    # Build message with images + text
-    message_content = [
-        {
-            "type": "text",
-            "text": f"""These are the items the user LIKED (with images):
-
-{liked_items_text}
-
-Here are ALL AVAILABLE ITEMS in the SAME CATEGORY:
-
-{all_items_text}
-
-Analyze the VISUAL style of the liked items (colors, graphics, patterns, aesthetic) and the text descriptions.
-
-Based on both the images and descriptions, recommend 10 similar items from the available list.
-
-Look for:
-- Similar color palettes
-- Similar graphic styles (vintage, minimalist, bold, etc.)
-- Similar visual aesthetic
-- Similar price range
-
-CRITICAL: Return ONLY a comma-separated list of MongoDB IDs (24-character hex strings).
-NO explanations, NO extra text.
-
-Example format: 6962e11fca3dce721a6185d9,6962e11fca3dce721a61861a
-
-Return the IDs now:"""
-        }
-    ]
-
-    # Add all images to the message
-    message_content.extend(image_contents)
-
-    try:
-        print(
-            f"\n🤖 Sending {len(image_contents)} images + text to Gemini for analysis...")
-
-        completion = openrouter_client.chat.completions.create(
-            model="google/gemini-2.5-flash",  # Supports vision
-            messages=[
-                {
-                    "role": "user",
-                    "content": message_content
-                }
-            ]
-        )
-
-        response_text = completion.choices[0].message.content.strip()
-
-        # Extract IDs using regex
-        import re
-        found_ids = {**re.findall(r'[a-f0-9]{24}', response_text)}
-
-        print(f"📝 Found {len(found_ids)} potential IDs")
-
-        recommendations = []
-        for id_str in found_ids[:10]:
-            try:
-                listing = collection.find_one({'_id': ObjectId(id_str)})
-                if listing:
-                    listing['_id'] = str(listing['_id'])
-                    recommendations.append(listing)
-                    print(f"  ✅ Added: {listing.get('name', 'Unknown')[:40]}")
-            except Exception as e:
-                print(f"  ⚠️ Could not fetch {id_str}: {e}")
-                continue
-
-        print(f"\n✅ Returning {len(recommendations)} recommendations\n")
-        return recommendations
-
-    except Exception as e:
-        print(f"❌ AI API Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-
 if __name__ == '__main__':
+    print("🚀 ThriftTinder API starting...")
+    try:
+        count = collection.count_documents({})
+        print(f"📊 Database has {count} listings")
+        
+        for category in ["mens_shirts", "mens_jeans", "womens_tops", "womens_skirts"]:
+            cat_count = collection.count_documents({"category": category})
+            print(f"  {category}: {cat_count} items")
+    except Exception as e:
+        print(f"⚠️ Database connection issue: {e}")
     app.run(port=5000)
